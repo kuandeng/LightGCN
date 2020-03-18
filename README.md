@@ -27,7 +27,7 @@ python LightGCN.py --dataset yelp2018 --regs [1e-4] --embed_size 64 --layer_size
 ```
 * Amazon-book dataset
 ```
-python LightGCN.py --dataset amazon-book --regs [1e-4] --embed_size 64 --layer_size [64,64,64,64] --lr 0.001 --batch_size 1024 --epoch 200 
+python LightGCN.py --dataset amazon-book --regs [1e-5] --embed_size 64 --layer_size [64,64,64,64] --lr 0.001 --batch_size 1024 --epoch 200 
 ```
 
 ## Dataset
