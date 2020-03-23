@@ -29,7 +29,7 @@ def parse_args():
 
     parser.add_argument('--embed_size', type=int, default=64,
                         help='Embedding size.')
-    parser.add_argument('--layer_size', nargs='?', default='[64]',
+    parser.add_argument('--layer_size', nargs='?', default='[64, 64, 64, 64]',
                         help='Output sizes of every layer')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size.')
@@ -57,7 +57,7 @@ def parse_args():
                         help='Keep probability w.r.t. message dropout (i.e., 1-dropout_ratio) for each deep layer. 1: no dropout.')
 
     parser.add_argument('--Ks', nargs='?', default='[20]',
-                        help='Output sizes of every layer')
+                        help='Top k(s) recommend')
 
     parser.add_argument('--save_flag', type=int, default=0,
                         help='0: Disable model saver, 1: Activate model saver')

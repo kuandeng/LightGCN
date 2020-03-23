@@ -5,8 +5,11 @@ Wang Xiang et al. Neural Graph Collaborative Filtering. In SIGIR 2019.
 
 @author: Xiang Wang (xiangwang@u.nus.edu)
 
-version: parallelize negative sampling on CPU
+version:
+Parallelized sampling on CPU
+C++ evaluation for top-k recommendation
 '''
+
 import os
 import sys
 import threading
@@ -14,12 +17,10 @@ import tensorflow as tf
 from tensorflow.python.client import device_lib
 from utility.helper import *
 from utility.batch_test import *
-
 os.environ['TF_CPP_MIN_LOG_LEVEL']='2'
 
 gpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'GPU']
 cpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'CPU']
-
 
 class LightGCN(object):
     def __init__(self, data_config, pretrain_data):
@@ -42,6 +43,7 @@ class LightGCN(object):
         self.decay = self.regs[0]
         self.log_dir=self.create_model_str()
         self.verbose = args.verbose
+        self.Ks = eval(args.Ks)
 
 
         '''
@@ -69,14 +71,16 @@ class LightGCN(object):
         
         
         with tf.name_scope('TRAIN_ACC'):
-            self.train_rec20 = tf.placeholder(tf.float32)
-            tf.summary.scalar('train_rec20', self.train_rec20)
-            self.train_rec100 = tf.placeholder(tf.float32)
-            tf.summary.scalar('train_rec100', self.train_rec100)
-            self.train_ndcg20 = tf.placeholder(tf.float32)
-            tf.summary.scalar('train_ndcg20', self.train_ndcg20)
-            self.train_ndcg100 = tf.placeholder(tf.float32)
-            tf.summary.scalar('train_ndcg100', self.train_ndcg100)
+            self.train_rec_first = tf.placeholder(tf.float32)
+            #record for top(Ks[0])
+            tf.summary.scalar('train_rec_first', self.train_rec_first)
+            self.train_rec_last = tf.placeholder(tf.float32)
+            #record for top(Ks[-1])
+            tf.summary.scalar('train_rec_last', self.train_rec_last)
+            self.train_ndcg_first = tf.placeholder(tf.float32)
+            tf.summary.scalar('train_ndcg_first', self.train_ndcg_first)
+            self.train_ndcg_last = tf.placeholder(tf.float32)
+            tf.summary.scalar('train_ndcg_last', self.train_ndcg_last)
         self.merged_train_acc = tf.summary.merge(tf.get_collection(tf.GraphKeys.SUMMARIES, 'TRAIN_ACC'))
 
         with tf.name_scope('TEST_LOSS'):
@@ -91,14 +95,14 @@ class LightGCN(object):
         self.merged_test_loss = tf.summary.merge(tf.get_collection(tf.GraphKeys.SUMMARIES, 'TEST_LOSS'))
 
         with tf.name_scope('TEST_ACC'):
-            self.test_rec20 = tf.placeholder(tf.float32)
-            tf.summary.scalar('test_rec20', self.test_rec20)
-            self.test_rec100 = tf.placeholder(tf.float32)
-            tf.summary.scalar('test_rec100', self.test_rec100)
-            self.test_ndcg20 = tf.placeholder(tf.float32)
-            tf.summary.scalar('test_ndcg20', self.test_ndcg20)
-            self.test_ndcg100 = tf.placeholder(tf.float32)
-            tf.summary.scalar('test_ndcg100', self.test_ndcg100)
+            self.test_rec_first = tf.placeholder(tf.float32)
+            tf.summary.scalar('test_rec_first', self.test_rec_first)
+            self.test_rec_last = tf.placeholder(tf.float32)
+            tf.summary.scalar('test_rec_last', self.test_rec_last)
+            self.test_ndcg_first = tf.placeholder(tf.float32)
+            tf.summary.scalar('test_ndcg_first', self.test_ndcg_first)
+            self.test_ndcg_last = tf.placeholder(tf.float32)
+            tf.summary.scalar('test_ndcg_last', self.test_ndcg_last)
         self.merged_test_acc = tf.summary.merge(tf.get_collection(tf.GraphKeys.SUMMARIES, 'TEST_ACC'))
         """
         *********************************************************
@@ -154,7 +158,8 @@ class LightGCN(object):
         self.loss = self.mf_loss + self.emb_loss
 
         self.opt = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
-        
+    
+    
     def create_model_str(self):
         log_dir = '/' + self.alg_type+'/layers_'+str(self.n_layers)+'/dim_'+str(self.emb_dim)
         log_dir+='/'+args.dataset+'/lr_' + str(self.lr) + '/reg_' + str(self.decay)
@@ -378,7 +383,7 @@ def load_pretrained_data():
         pretrain_data = None
     return pretrain_data
 
-
+# parallelized sampling on CPU 
 class sample_thread(threading.Thread):
     def __init__(self):
         threading.Thread.__init__(self)
@@ -393,6 +398,7 @@ class sample_thread_test(threading.Thread):
         with tf.device(cpus[0]):
             self.data = data_generator.sample_test()
             
+# training on GPU
 class train_thread(threading.Thread):
     def __init__(self,model, sess, sample):
         threading.Thread.__init__(self)
@@ -441,6 +447,7 @@ class train_thread_test(threading.Thread):
 if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
     f0 = time()
+    
     config = dict()
     config['n_users'] = data_generator.n_users
     config['n_items'] = data_generator.n_items
@@ -512,13 +519,12 @@ if __name__ == '__main__':
                 users_to_test = list(data_generator.test_set.keys())
                 ret = test(sess, model, users_to_test, drop_flag=True)
                 cur_best_pre_0 = ret['recall'][0]
-
-                pretrain_ret = 'pretrained model recall=[%.5f, %.5f], precision=[%.5f, %.5f], hit=[%.5f, %.5f],' \
-                               'ndcg=[%.5f, %.5f]' % \
-                               (ret['recall'][0], ret['recall'][-1],
-                                ret['precision'][0], ret['precision'][-1],
-                                ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                                ret['ndcg'][0], ret['ndcg'][-1])
+                
+                pretrain_ret = 'pretrained model recall=[%s], precision=[%s], '\
+                               'ndcg=[%s]' % \
+                               (', '.join(['%.5f' % r for r in ret['recall']]),
+                                ', '.join(['%.5f' % r for r in ret['precision']]),
+                                ', '.join(['%.5f' % r for r in ret['ndcg']]))
                 print(pretrain_ret)
         else:
             sess.run(tf.global_variables_initializer())
@@ -550,12 +556,10 @@ if __name__ == '__main__':
         for i, users_to_test in enumerate(users_to_test_list):
             ret = test(sess, model, users_to_test, drop_flag=True)
 
-            final_perf = "recall=[%s], precision=[%s], hit=[%s], ndcg=[%s]" % \
-                         ('\t'.join(['%.5f' % r for r in ret['recall']]),
-                          '\t'.join(['%.5f' % r for r in ret['precision']]),
-                          '\t'.join(['%.5f' % r for r in ret['hit_ratio']]),
-                          '\t'.join(['%.5f' % r for r in ret['ndcg']]))
-            print(final_perf)
+            final_perf = "recall=[%s], precision=[%s], ndcg=[%s]" % \
+                         (', '.join(['%.5f' % r for r in ret['recall']]),
+                          ', '.join(['%.5f' % r for r in ret['precision']]),
+                          ', '.join(['%.5f' % r for r in ret['ndcg']]))
 
             f.write('\t%s\n\t%s\n' % (split_state[i], final_perf))
         f.close()
@@ -565,7 +569,7 @@ if __name__ == '__main__':
     *********************************************************
     Train.
     """
-    tensorboard_model_path = '/logs'
+    tensorboard_model_path = 'tensorboard/'
     if not os.path.exists(tensorboard_model_path):
         os.makedirs(tensorboard_model_path)
     run_time = 1
@@ -582,14 +586,14 @@ if __name__ == '__main__':
     should_stop = False
     
     
-    for epoch in range(args.epoch):
+    for epoch in range(1, args.epoch + 1):
         t1 = time()
         loss, mf_loss, emb_loss, reg_loss = 0., 0., 0., 0.
         n_batch = data_generator.n_train // args.batch_size + 1
         loss_test,mf_loss_test,emb_loss_test,reg_loss_test=0.,0.,0.,0.
         '''
         *********************************************************
-        parallelized version
+        parallelized sampling
         '''
         sample_last = sample_thread()
         sample_last.start()
@@ -620,29 +624,29 @@ if __name__ == '__main__':
             print('ERROR: loss is nan.')
             sys.exit()
         
-        if (epoch + 1) % 20 != 0:
+        if (epoch % 20) != 0:
             if args.verbose > 0 and epoch % args.verbose == 0:
                 perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f]' % (
                     epoch, time() - t1, loss, mf_loss, emb_loss)
                 print(perf_str)
             continue
         users_to_test = list(data_generator.train_items.keys())
-        ret = test(sess, model, users_to_test,drop_flag=True,train_set_flag=1)
-        perf_str = 'Epoch %d: train==[%.5f=%.5f + %.5f + %.5f], recall=[%.5f, %.5f], ' \
-                   'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                   (epoch, loss, mf_loss, emb_loss, reg_loss, ret['recall'][0], ret['recall'][-1],
-                    ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                    ret['ndcg'][0], ret['ndcg'][-1])
+        ret = test(sess, model, users_to_test ,drop_flag=True,train_set_flag=1)
+        perf_str = 'Epoch %d: train==[%.5f=%.5f + %.5f + %.5f], recall=[%s], precision=[%s], ndcg=[%s]' % \
+                   (epoch, loss, mf_loss, emb_loss, reg_loss, 
+                    ', '.join(['%.5f' % r for r in ret['recall']]),
+                    ', '.join(['%.5f' % r for r in ret['precision']]),
+                    ', '.join(['%.5f' % r for r in ret['ndcg']]))
         print(perf_str)
-        summary_train_acc = sess.run(model.merged_train_acc, feed_dict={model.train_rec20: ret['recall'][0],
-                                                                        model.train_rec100: ret['recall'][-1],
-                                                                        model.train_ndcg20: ret['ndcg'][0],
-                                                                        model.train_ndcg100: ret['ndcg'][-1]})
-        train_writer.add_summary(summary_train_acc, (epoch + 1) // 20)
+        summary_train_acc = sess.run(model.merged_train_acc, feed_dict={model.train_rec_first: ret['recall'][0],
+                                                                        model.train_rec_last: ret['recall'][-1],
+                                                                        model.train_ndcg_first: ret['ndcg'][0],
+                                                                        model.train_ndcg_last: ret['ndcg'][-1]})
+        train_writer.add_summary(summary_train_acc, epoch // 20)
         
         '''
         *********************************************************
-        parallelized version
+        parallelized sampling
         '''
         sample_last= sample_thread_test()
         sample_last.start()
@@ -668,32 +672,32 @@ if __name__ == '__main__':
         summary_test_loss = sess.run(model.merged_test_loss,
                                      feed_dict={model.test_loss: loss_test, model.test_mf_loss: mf_loss_test,
                                                 model.test_emb_loss: emb_loss_test, model.test_reg_loss: reg_loss_test})
-        train_writer.add_summary(summary_test_loss, (epoch + 1) // 20)
+        train_writer.add_summary(summary_test_loss, epoch // 20)
         t2 = time()
         users_to_test = list(data_generator.test_set.keys())
         ret = test(sess, model, users_to_test, drop_flag=True)
         summary_test_acc = sess.run(model.merged_test_acc,
-                                    feed_dict={model.test_rec20: ret['recall'][0], model.test_rec100: ret['recall'][-1],
-                                               model.test_ndcg20: ret['ndcg'][0], model.test_ndcg100: ret['ndcg'][-1]})
-        train_writer.add_summary(summary_test_acc, (epoch + 1) // 20)
+                                    feed_dict={model.test_rec_first: ret['recall'][0], model.test_rec_last: ret['recall'][-1],
+                                               model.test_ndcg_first: ret['ndcg'][0], model.test_ndcg_last: ret['ndcg'][-1]})
+        train_writer.add_summary(summary_test_acc, epoch // 20)
                                                                                                  
                                                                                                  
         t3 = time()
-
+        
         loss_loger.append(loss)
         rec_loger.append(ret['recall'])
         pre_loger.append(ret['precision'])
         ndcg_loger.append(ret['ndcg'])
-        hit_loger.append(ret['hit_ratio'])
 
         if args.verbose > 0:
-            perf_str = 'Epoch %d [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%.5f, %.5f], ' \
-                       'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                       (epoch, t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, ret['recall'][0], ret['recall'][-1],
-                        ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                        ret['ndcg'][0], ret['ndcg'][-1])
+            perf_str = 'Epoch %d [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%s], ' \
+                       'precision=[%s], ndcg=[%s]' % \
+                       (epoch, t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, 
+                        ', '.join(['%.5f' % r for r in ret['recall']]),
+                        ', '.join(['%.5f' % r for r in ret['precision']]),
+                        ', '.join(['%.5f' % r for r in ret['ndcg']]))
             print(perf_str)
-
+            
         cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['recall'][0], cur_best_pre_0,
                                                                     stopping_step, expected_order='acc', flag_step=5)
 
@@ -710,15 +714,13 @@ if __name__ == '__main__':
     recs = np.array(rec_loger)
     pres = np.array(pre_loger)
     ndcgs = np.array(ndcg_loger)
-    hit = np.array(hit_loger)
 
     best_rec_0 = max(recs[:, 0])
     idx = list(recs[:, 0]).index(best_rec_0)
 
-    final_perf = "Best Iter=[%d]@[%.1f]\trecall=[%s], precision=[%s], hit=[%s], ndcg=[%s]" % \
+    final_perf = "Best Iter=[%d]@[%.1f]\trecall=[%s], precision=[%s], ndcg=[%s]" % \
                  (idx, time() - t0, '\t'.join(['%.5f' % r for r in recs[idx]]),
                   '\t'.join(['%.5f' % r for r in pres[idx]]),
-                  '\t'.join(['%.5f' % r for r in hit[idx]]),
                   '\t'.join(['%.5f' % r for r in ndcgs[idx]]))
     print(final_perf)
 
