@@ -1,6 +1,7 @@
 """
 @author: Zhongchuan Sun
 """
+import itertools
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import sys

@@ -110,8 +110,12 @@ class Data(object):
         adj_mat = sp.dok_matrix((self.n_users + self.n_items, self.n_users + self.n_items), dtype=np.float32)
         adj_mat = adj_mat.tolil()
         R = self.R.tolil()
-        adj_mat[:self.n_users, self.n_users:] = R
-        adj_mat[self.n_users:, :self.n_users] = R.T
+        # prevent memory from overflowing
+        for i in range(5):
+            adj_mat[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5), self.n_users:] =\
+            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)]
+            adj_mat[self.n_users:,int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)] =\
+            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)].T
         adj_mat = adj_mat.todok()
         print('already create adjacency matrix', adj_mat.shape, time() - t1)
         
