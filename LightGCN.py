@@ -282,7 +282,7 @@ class LightGCN(object):
             ego_embeddings = sum_embeddings + bi_embeddings
 
             # message dropout.
-            ego_embeddings = tf.nn.dropout(ego_embeddings, 1 - self.mess_dropout[k])
+            # ego_embeddings = tf.nn.dropout(ego_embeddings, 1 - self.mess_dropout[k])
 
             # normalize the distribution of embeddings.
             norm_embeddings = tf.nn.l2_normalize(ego_embeddings, axis=1)
@@ -308,7 +308,7 @@ class LightGCN(object):
 
             embeddings = tf.concat(temp_embed, 0)
             embeddings = tf.nn.leaky_relu(tf.matmul(embeddings, self.weights['W_gc_%d' %k]) + self.weights['b_gc_%d' %k])
-            embeddings = tf.nn.dropout(embeddings, 1 - self.mess_dropout[k])
+            # embeddings = tf.nn.dropout(embeddings, 1 - self.mess_dropout[k])
 
             all_embeddings += [embeddings]
 
@@ -332,7 +332,7 @@ class LightGCN(object):
             embeddings = tf.nn.leaky_relu(tf.matmul(embeddings, self.weights['W_gc_%d' % k]) + self.weights['b_gc_%d' % k])
             # dense layer.
             mlp_embeddings = tf.matmul(embeddings, self.weights['W_mlp_%d' %k]) + self.weights['b_mlp_%d' %k]
-            mlp_embeddings = tf.nn.dropout(mlp_embeddings, 1 - self.mess_dropout[k])
+            # mlp_embeddings = tf.nn.dropout(mlp_embeddings, 1 - self.mess_dropout[k])
 
             all_embeddings += [mlp_embeddings]
         all_embeddings = tf.concat(all_embeddings, 1)
