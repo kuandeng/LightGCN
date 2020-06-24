@@ -5,8 +5,12 @@ This is our Tensorflow implementation for our SIGIR 2020 paper:
 
 Contributors: Dr. Xiangnan He (staff.ustc.edu.cn/~hexn/), Kuan Deng, Yingxin Wu.
 
+We also provide Pytorch implementation for LightGCN : https://github.com/gusye1234/LightGCN-PyTorch. 
+
+Contributors: Janbai Ye.
+
 ## Introduction
-In this work, we aim to simplify the design of GCN to make it more concise and appropriate for recommendation. We propose a new model named LightGCN, including only the most essential component in GCN—neighborhood aggregation—for collaborative filtering
+In this work, we aim to simplify the design of GCN to make it more concise and appropriate for recommendation. We propose a new model named LightGCN, including only the most essential component in GCN—neighborhood aggregation—for collaborative filtering.
 
 ## Environment Requirement
 The code has been tested running under Python 3.6.5. The required packages are as follows:
