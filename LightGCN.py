@@ -2,9 +2,7 @@
 Created on Oct 10, 2018
 Tensorflow Implementation of Neural Graph Collaborative Filtering (NGCF) model in:
 Wang Xiang et al. Neural Graph Collaborative Filtering. In SIGIR 2019.
-
 @author: Xiang Wang (xiangwang@u.nus.edu)
-
 version:
 Parallelized sampling on CPU
 C++ evaluation for top-k recommendation
@@ -19,7 +17,6 @@ from utility.helper import *
 from utility.batch_test import *
 os.environ['TF_CPP_MIN_LOG_LEVEL']='2'
 
-gpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'GPU']
 cpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'CPU']
 
 class LightGCN(object):
@@ -406,21 +403,14 @@ class train_thread(threading.Thread):
         self.sess = sess
         self.sample = sample
     def run(self):
-        if len(gpus):
-            with tf.device(gpus[-1]):
-                users, pos_items, neg_items = self.sample.data
-                self.data = sess.run([self.model.opt, self.model.loss, self.model.mf_loss, self.model.emb_loss, self.model.reg_loss],
-                                       feed_dict={model.users: users, model.pos_items: pos_items,
-                                                  model.node_dropout: eval(args.node_dropout),
-                                                  model.mess_dropout: eval(args.mess_dropout),
-                                                  model.neg_items: neg_items})
-        else:
-            users, pos_items, neg_items = self.sample.data
-            self.data = sess.run([self.model.opt, self.model.loss, self.model.mf_loss, self.model.emb_loss, self.model.reg_loss],
-                                       feed_dict={model.users: users, model.pos_items: pos_items,
-                                                  model.node_dropout: eval(args.node_dropout),
-                                                  model.mess_dropout: eval(args.mess_dropout),
-                                                  model.neg_items: neg_items})
+
+        users, pos_items, neg_items = self.sample.data
+        self.data = sess.run([self.model.opt, self.model.loss, self.model.mf_loss, self.model.emb_loss, self.model.reg_loss],
+                                feed_dict={model.users: users, model.pos_items: pos_items,
+                                            model.node_dropout: eval(args.node_dropout),
+                                            model.mess_dropout: eval(args.mess_dropout),
+                                            model.neg_items: neg_items})
+
 class train_thread_test(threading.Thread):
     def __init__(self,model, sess, sample):
         threading.Thread.__init__(self)
@@ -428,21 +418,13 @@ class train_thread_test(threading.Thread):
         self.sess = sess
         self.sample = sample
     def run(self):
-        if len(gpus):
-            with tf.device(gpus[-1]):
-                users, pos_items, neg_items = self.sample.data
-                self.data = sess.run([self.model.loss, self.model.mf_loss, self.model.emb_loss],
-                                     feed_dict={model.users: users, model.pos_items: pos_items,
-                                                model.neg_items: neg_items,
-                                                model.node_dropout: eval(args.node_dropout),
-                                                model.mess_dropout: eval(args.mess_dropout)})
-        else:
-            users, pos_items, neg_items = self.sample.data
-            self.data = sess.run([self.model.loss, self.model.mf_loss, self.model.emb_loss],
-                                     feed_dict={model.users: users, model.pos_items: pos_items,
-                                                model.neg_items: neg_items,
-                                                model.node_dropout: eval(args.node_dropout),
-                                                model.mess_dropout: eval(args.mess_dropout)})            
+        
+        users, pos_items, neg_items = self.sample.data
+        self.data = sess.run([self.model.loss, self.model.mf_loss, self.model.emb_loss],
+                                feed_dict={model.users: users, model.pos_items: pos_items,
+                                        model.neg_items: neg_items,
+                                        model.node_dropout: eval(args.node_dropout),
+                                        model.mess_dropout: eval(args.mess_dropout)})       
 
 if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
