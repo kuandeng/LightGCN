@@ -41,8 +41,9 @@ n_train=810128, n_test=217242, sparsity=0.00084
 Epoch 1 [30.3s]: train==[0.46925=0.46911 + 0.00014]
 Epoch 2 [27.1s]: train==[0.21866=0.21817 + 0.00048]
       ...
-Epoch 1000 [51.4s + 11.1s]: test==[0.13277=0.12649 + 0.00627 + 0.00000], recall=[0.18123], precision=[0.05618], ndcg=[0.15553]
-Best Iter=[45]@[28563.4]	recall=[0.18198], precision=[0.05613], ndcg=[0.15523]
+Epoch 879 [81.6s + 31.3s]: test==[0.13271=0.12645 + 0.00626 + 0.00000], recall=[0.18201], precision=[0.05601], ndcg=[0.15555]
+Early stopping is trigger at step: 5 log:0.18201370537281036
+Best Iter=[38]@[32829.6]	recall=[0.18236], precision=[0.05607], ndcg=[0.15539]
 ```
 
 
@@ -61,14 +62,14 @@ n_train=1237259, n_test=324147, sparsity=0.00130
 Epoch 1 [56.5s]: train==[0.33843=0.33815 + 0.00028]
 Epoch 2 [53.1s]: train==[0.16253=0.16192 + 0.00061]
     ...
-Epoch 840 [91.6s + 10.5s]: test==[0.17441=0.16502 + 0.00939 + 0.00000], recall=[0.06398], precision=[0.02880], ndcg=[0.05265]
-Early stopping is trigger at step: 5 log:0.06398
-Best Iter=[36]@[47231.3]	recall=[0.06446], precision=[0.02890], ndcg=[0.05279]
+Epoch 679 [104.6s + 12.9s]: test==[0.17217=0.16289 + 0.00929 + 0.00000], recall=[0.06359], precision=[0.02874], ndcg=[0.05240]
+Early stopping is trigger at step: 5 log:0.06359195709228516
+Best Iter=[28]@[42815.0]	recall=[0.06367], precision=[0.02868], ndcg=[0.05236]
 ```
 ### Amazon-book dataset
 * Command
 ```
-python LightGCN.py --dataset amazon-book --regs [1e-4] --embed_size 64 --layer_size [64,64,64] --lr 0.001 --batch_size 4096 --epoch 1000
+python LightGCN.py --dataset amazon-book --regs [1e-4] --embed_size 64 --layer_size [64,64,64] --lr 0.001 --batch_size 8192 --epoch 1000
 ```
 * Output log :
 ```
@@ -80,8 +81,9 @@ n_train=2380730, n_test=603378, sparsity=0.00062
 Epoch 1 [53.2s]: train==[0.57471=0.57463 + 0.00008]
 Epoch 2 [47.3s]: train==[0.31518=0.31478 + 0.00040]
     ...
-Epoch 1000 [123.4s + 20.6s]: test==[0.20296=0.19421 + 0.00875 + 0.00000], recall=[0.04171], precision=[0.01725], ndcg=[0.03224]
-Best Iter=[49]@[51723.6]	recall=[0.04171], precision=[0.01725], ndcg=[0.03224]
+Epoch 779 [181.7s + 79.0s]: test==[0.20300=0.19434 + 0.00866 + 0.00000], recall=[0.04120], precision=[0.01703], ndcg=[0.03186]
+Early stopping is trigger at step: 5 log:0.04119725897908211
+Best Iter=[33]@[49875.4]	recall=[0.04123], precision=[0.01710], ndcg=[0.03189]
 ```
 NOTE : the duration of training and testing depends on the running environment.
 ## Dataset
