@@ -165,11 +165,11 @@ class LightGCN(object):
 
     def _init_weights(self):
         all_weights = dict()
-        initializer = tf.contrib.layers.xavier_initializer()
+        initializer = tf.random_normal_initializer(stddev=0.01) #tf.contrib.layers.xavier_initializer()
         if self.pretrain_data is None:
             all_weights['user_embedding'] = tf.Variable(initializer([self.n_users, self.emb_dim]), name='user_embedding')
             all_weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='item_embedding')
-            print('using xavier initialization')
+            print('using random initialization')#print('using xavier initialization')
         else:
             all_weights['user_embedding'] = tf.Variable(initial_value=self.pretrain_data['user_embed'], trainable=True,
                                                         name='user_embedding', dtype=tf.float32)
