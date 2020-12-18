@@ -28,9 +28,14 @@ class LightGCN(object):
         self.pretrain_data = pretrain_data
         self.n_users = data_config['n_users']
         self.n_items = data_config['n_items']
+        self.n_cat = data_config['n_cat']
+        self.n_price = data_config['n_price']
         self.n_fold = 100
         self.norm_adj = data_config['norm_adj']
-        self.n_nonzero_elems = self.norm_adj.count_nonzero()
+        if args.adj_type == 'adj_with_cp':
+            self.cat_and_price_adj = data_config['cat_and_price_adj']
+        self.n_nonzero_elems = self.norm_adj.count_nonzero()        
+        #TODO: If we reduce a adjacency matrix, n_nonzero_elem might need to be changed, as this has counted the wrong adjacency matrix
         self.lr = args.lr
         self.emb_dim = args.embed_size
         self.batch_size = args.batch_size
@@ -128,6 +133,12 @@ class LightGCN(object):
         elif self.alg_type in ['gcmc']:
             self.ua_embeddings, self.ia_embeddings = self._create_gcmc_embed()
 
+        elif self.alg_type in ['ngcfpas']:
+            self.ua_embeddings, self.ia_embeddings = self._create_ngcf_pas_embed()
+
+        elif self.alg_type in ['pas']:
+            self.ua_embeddings, self.ia_embeddings = self._create_price_aware_simple_embed()
+
         """
         *********************************************************
         Establish the final representations for user-item pairs in batch.
@@ -169,12 +180,18 @@ class LightGCN(object):
         if self.pretrain_data is None:
             all_weights['user_embedding'] = tf.Variable(initializer([self.n_users, self.emb_dim]), name='user_embedding')
             all_weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='item_embedding')
+            all_weights['price_embedding'] = tf.Variable(initializer([self.n_price, self.emb_dim]), name='price_embedding')
+            all_weights['cat_embedding'] = tf.Variable(initializer([self.n_cat, self.emb_dim]), name='cat_embedding')
             print('using random initialization')#print('using xavier initialization')
         else:
             all_weights['user_embedding'] = tf.Variable(initial_value=self.pretrain_data['user_embed'], trainable=True,
                                                         name='user_embedding', dtype=tf.float32)
             all_weights['item_embedding'] = tf.Variable(initial_value=self.pretrain_data['item_embed'], trainable=True,
                                                         name='item_embedding', dtype=tf.float32)
+            all_weights['price_embedding'] = tf.Variable(initial_value=self.pretrain_data['price_embed'], trainable=True,
+                                                        name='price_embedding', dtype=tf.float32)
+            all_weights['cat_embedding'] = tf.Variable(initial_value=self.pretrain_data['cat_embed'], trainable=True,
+                                                        name='cat_embedding', dtype=tf.float32)
             print('using pretrained initialization')
             
         self.weight_size_list = [self.emb_dim] + self.weight_size
@@ -198,12 +215,12 @@ class LightGCN(object):
         return all_weights
     def _split_A_hat(self, X):
         A_fold_hat = []
-
-        fold_len = (self.n_users + self.n_items) // self.n_fold
+        length_of_adj = (X._shape[0])
+        fold_len = length_of_adj // self.n_fold
         for i_fold in range(self.n_fold):
             start = i_fold * fold_len
             if i_fold == self.n_fold -1:
-                end = self.n_users + self.n_items
+                end = length_of_adj
             else:
                 end = (i_fold + 1) * fold_len
 
@@ -212,12 +229,13 @@ class LightGCN(object):
 
     def _split_A_hat_node_dropout(self, X):
         A_fold_hat = []
-
-        fold_len = (self.n_users + self.n_items) // self.n_fold
+        length_of_adj = (X._shape[0])
+		#num_user+num_items // 100
+        fold_len = (length_of_adj) // self.n_fold
         for i_fold in range(self.n_fold):
             start = i_fold * fold_len
             if i_fold == self.n_fold -1:
-                end = self.n_users + self.n_items
+                end = length_of_adj
             else:
                 end = (i_fold + 1) * fold_len
 
@@ -227,9 +245,71 @@ class LightGCN(object):
 
         return A_fold_hat
 
+    def _create_price_aware_simple_embed(self): #adj matrix of I x U,C,P (one category pr. item)
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.cat_and_price_adj) # performance reasons
+        else:
+            A_fold_hat = self._split_A_hat(self.cat_and_price_adj)
+        
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding'],self.weights['cat_embedding'], self.weights['price_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+        print("Size of ego_embeddings: ", ego_embeddings._shape)
+        print("Size of cat_and_price_adj: ", self.cat_and_price_adj._shape)
+        print("Size of A_fold_hat: ", len(A_fold_hat))
+        for k in range(0, self.n_layers):
+            temp_embed = []
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+
+            side_embeddings = tf.concat(temp_embed, 0)
+            ego_embeddings = side_embeddings
+            all_embeddings += [ego_embeddings]
+        all_embeddings=tf.stack(all_embeddings,1)
+        all_embeddings=tf.reduce_mean(all_embeddings,axis=1,keepdims=False)
+        u_g_embeddings, i_g_embeddings, c_g_embeddings, p_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items, self.n_cat, self.n_price], 0)
+        return u_g_embeddings, i_g_embeddings
+
+    def _create_ngcf_pas_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.cat_and_price_adj)
+        else:
+            A_fold_hat = self._split_A_hat(self.cat_and_price_adj)
+
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding'],self.weights['cat_embedding'], self.weights['price_embedding']], axis=0)
+
+        all_embeddings = [ego_embeddings]
+
+        for k in range(0, self.n_layers):
+
+            temp_embed = []
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+
+            side_embeddings = tf.concat(temp_embed, 0)
+            sum_embeddings = tf.nn.leaky_relu(tf.matmul(side_embeddings, self.weights['W_gc_%d' % k]) + self.weights['b_gc_%d' % k])
+            # bi messages of neighbors.
+            bi_embeddings = tf.multiply(ego_embeddings, side_embeddings)
+            # transformed bi messages of neighbors.
+            bi_embeddings = tf.nn.leaky_relu(tf.matmul(bi_embeddings, self.weights['W_bi_%d' % k]) + self.weights['b_bi_%d' % k])
+            # non-linear activation.
+            ego_embeddings = sum_embeddings + bi_embeddings
+
+            # message dropout.
+            # ego_embeddings = tf.nn.dropout(ego_embeddings, 1 - self.mess_dropout[k])
+            # normalize the distribution of embeddings.
+            norm_embeddings = tf.nn.l2_normalize(ego_embeddings, axis=1)
+
+            all_embeddings += [norm_embeddings]
+
+        all_embeddings = tf.concat(all_embeddings, 1)
+        u_g_embeddings, i_g_embeddings, c_g_embeddings, p_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items, self.n_cat, self.n_price], 0)
+        return u_g_embeddings, i_g_embeddings
+
+
+
     def _create_lightgcn_embed(self):
         if self.node_dropout_flag:
-            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj) # performance reasons
         else:
             A_fold_hat = self._split_A_hat(self.norm_adj)
         
@@ -237,7 +317,7 @@ class LightGCN(object):
         all_embeddings = [ego_embeddings]
         
         for k in range(0, self.n_layers):
-
+            # Equation 8
             temp_embed = []
             for f in range(self.n_fold):
                 temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
@@ -431,17 +511,25 @@ if __name__ == '__main__':
     f0 = time()
     
     config = dict()
+	#number of users
     config['n_users'] = data_generator.n_users
+	#number of items
     config['n_items'] = data_generator.n_items
+    config['n_cat'] = data_generator.n_cat
+    config['n_price'] = data_generator.n_price
 
     """
     *********************************************************
     Generate the Laplacian matrix, where each entry defines the decay factor (e.g., p_ui) between two connected nodes.
     """
-    plain_adj, norm_adj, mean_adj,pre_adj = data_generator.get_adj_mat()
+    plain_adj, norm_adj, mean_adj,pre_adj, adj_with_cp = data_generator.get_adj_mat()
     if args.adj_type == 'plain':
         config['norm_adj'] = plain_adj
         print('use the plain adjacency matrix')
+    elif args.adj_type == 'adj_with_cp':
+        config['norm_adj'] = plain_adj
+        config['cat_and_price_adj'] = adj_with_cp
+        print('use the adjacency matrix with categories and price')
     elif args.adj_type == 'norm':
         config['norm_adj'] = norm_adj
         print('use the normalized adjacency matrix')

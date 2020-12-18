@@ -10,6 +10,12 @@ import random as rd
 import scipy.sparse as sp
 from time import time
 
+class business_model:
+    def __init__(self, id, categories, price):
+        self.id = id
+        self.categories = categories
+        self.price = price  
+
 class Data(object):
     def __init__(self, path, batch_size):
         self.path = path
@@ -17,13 +23,38 @@ class Data(object):
 
         train_file = path + '/train.txt'
         test_file = path + '/test.txt'
+        item_file = path + '/item_list.txt'
 
         self.n_users, self.n_items = 0, 0
+        self.n_cat, self.n_price = 0, 0
         self.n_train, self.n_test = 0, 0
         self.neg_pools = {}
+        self.price_list = []
+        self.cat_list = []
+        self.business_list = []
 
         self.exist_users = []
+        #read item_list containing category and prices
+        with open(item_file) as f:
+            for l in f.readlines():
+                if len(l) > 0:
+                    l = l.strip('\n').split(' ')
+                    if(l[-1] not in self.price_list and len(l) > 3): #Checks if price exists in list.
+                        self.price_list.append(l[-1])
+                        self.n_price += 1
+                    self.item_categories = []
+                    for i in range(2, len(l)): #The first two elements are item name and item id. The last i price
+                        if(i != len(l) and l[i] not in self.cat_list):
+                            self.cat_list.append(l[i])
+                            self.n_cat += 1
+                        self.item_categories.append(l[i])
+                    self.business_list.append(business_model(l[1], self.item_categories, l[-1]))
+        print('n_price: ' + str(self.n_price))
+        print('n_cat: ' + str(self.n_cat))
+        print('cat_list: ' + str(len(self.cat_list)))
+        print('price_list: ' + str(len(self.price_list)))
         
+        #read training file
         with open(train_file) as f:
             for l in f.readlines():
                 if len(l) > 0:
@@ -34,7 +65,7 @@ class Data(object):
                     self.n_items = max(self.n_items, max(items))
                     self.n_users = max(self.n_users, uid)
                     self.n_train += len(items)
-
+        #read test file
         with open(test_file) as f:
             for l in f.readlines():
                 if len(l) > 0:
@@ -48,6 +79,7 @@ class Data(object):
         self.n_items += 1
         self.n_users += 1
         self.print_statistics()
+		#matrix size num_users X num_items
         self.R = sp.dok_matrix((self.n_users, self.n_items), dtype=np.float32)
         self.train_items, self.test_set = {}, {}
         with open(train_file) as f_train:
@@ -80,14 +112,16 @@ class Data(object):
             adj_mat = sp.load_npz(self.path + '/s_adj_mat.npz')
             norm_adj_mat = sp.load_npz(self.path + '/s_norm_adj_mat.npz')
             mean_adj_mat = sp.load_npz(self.path + '/s_mean_adj_mat.npz')
+            adj_mat_with_cp = sp.load_npz(self.path + '/s_adj_mat_with_cp.npz')
             print('already load adj matrix', adj_mat.shape, time() - t1)
         
         except Exception:
-            adj_mat, norm_adj_mat, mean_adj_mat = self.create_adj_mat()
+            adj_mat, norm_adj_mat, mean_adj_mat, adj_mat_with_cp = self.create_adj_mat()
             sp.save_npz(self.path + '/s_adj_mat.npz', adj_mat)
             sp.save_npz(self.path + '/s_norm_adj_mat.npz', norm_adj_mat)
             sp.save_npz(self.path + '/s_mean_adj_mat.npz', mean_adj_mat)
-            
+            sp.save_npz(self.path + '/s_adj_mat_with_cp.npz', adj_mat_with_cp)
+
         try:
             pre_adj_mat = sp.load_npz(self.path + '/s_pre_adj_mat.npz')
         except Exception:
@@ -103,26 +137,66 @@ class Data(object):
             pre_adj_mat = norm_adj.tocsr()
             sp.save_npz(self.path + '/s_pre_adj_mat.npz', norm_adj)
             
-        return adj_mat, norm_adj_mat, mean_adj_mat,pre_adj_mat
+        return adj_mat, norm_adj_mat, mean_adj_mat,pre_adj_mat, adj_mat_with_cp
 
     def create_adj_mat(self):
         t1 = time()
+		#adj matrix = num_users+num_items X num_users+num_items
         adj_mat = sp.dok_matrix((self.n_users + self.n_items, self.n_users + self.n_items), dtype=np.float32)
         adj_mat = adj_mat.tolil()
         R = self.R.tolil()
         # prevent memory from overflowing
-        for i in range(5):
+        # indexing works by [start_row:end_row+1 , start_col: EMPTY] -> EMPTY means rest of the coloumn in this instance
+        for i in range(5):                                                                  # splits it in 5 parts and assigns part of the U x I matrix R to the adj matrix
             adj_mat[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5), self.n_users:] =\
-            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)]
+            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)]                          # Only iterates throuh users since items never interact
             adj_mat[self.n_users:,int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)] =\
-            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)].T
+            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)].T                        # adj matrix is U+I x U+I size
         adj_mat = adj_mat.todok()
         print('already create adjacency matrix', adj_mat.shape, time() - t1)
         
         t2 = time()
+        def adj_with_cat_and_price(adj): # Creates a U+I+C+P x U+I+C+P size matrix
+            size_of_ui_matrix = self.n_users + self.n_items
+            size_of_uic_matrix = self.n_users + self.n_items + self.n_cat
+            size_of_uicp_matrix = self.n_users + self.n_items + self.n_price + self.n_cat
+            adj_mat_with_cat_and_price = sp.dok_matrix((size_of_uicp_matrix, size_of_uicp_matrix), dtype=np.float32)
+            adj_mat_with_cat_and_price = adj_mat_with_cat_and_price.tolil()
+            print(adj_mat_with_cat_and_price._shape)
+
+            for i in range (5):
+                adj_mat_with_cat_and_price[int(self.n_users*i/5.0):int(self.n_users*(i+1)/5.0), self.n_users:size_of_ui_matrix] =\
+                adj[int(self.n_users*i/5.0):int(self.n_users*(i+1)/5.0), self.n_users:]
+                adj_mat_with_cat_and_price[self.n_users:size_of_ui_matrix,int(self.n_users*i/5.0):int(self.n_users*(i+1)/5.0)] =\
+                adj[int(self.n_users*i/5.0):int(self.n_users*(i+1)/5.0), self.n_users:].T
+                print("iteration: ", i)
+            print(adj_mat_with_cat_and_price._shape)
+
+            adj_connection_value = 1.0
+            for row in range(0, self.n_items):      # Iterates through the category list of each item to find connections
+                categories = self.business_list[row].categories
+                
+                for cat in categories:  # works for single and multiple categories pr item
+                    index = 0
+                    for all_cat in self.cat_list:
+                        if(cat == all_cat):
+                            adj_mat_with_cat_and_price[self.n_users + row, size_of_ui_matrix + index] = adj_connection_value # displace by n_users so that we give the correct item the category 
+                            adj_mat_with_cat_and_price[size_of_ui_matrix + index, self.n_users + row] = adj_connection_value # Insures symmetry in adj matrix
+                        index += 1
+                price = self.business_list[row].price
+                index = 0
+                for p in self.price_list:
+                    if p == price:
+                        adj_mat_with_cat_and_price[self.n_users + row, size_of_uic_matrix + index] = adj_connection_value
+                        adj_mat_with_cat_and_price[size_of_uic_matrix + index, self.n_users + row] = adj_connection_value
+
+                        break
+                    index += 1   
+            return adj_mat_with_cat_and_price
+
+
         def normalized_adj_single(adj):
             rowsum = np.array(adj.sum(1))
-
             d_inv = np.power(rowsum, -1).flatten()
             d_inv[np.isinf(d_inv)] = 0.
             d_mat_inv = sp.diags(d_inv)
@@ -141,9 +215,10 @@ class Data(object):
         
         norm_adj_mat = normalized_adj_single(adj_mat + sp.eye(adj_mat.shape[0]))
         mean_adj_mat = normalized_adj_single(adj_mat)
-        
+        adj_with_cp = adj_with_cat_and_price(adj_mat) 
+
         print('already normalize adjacency matrix', time() - t2)
-        return adj_mat.tocsr(), norm_adj_mat.tocsr(), mean_adj_mat.tocsr()
+        return adj_mat.tocsr(), norm_adj_mat.tocsr(), mean_adj_mat.tocsr(), adj_with_cp.tocsr()
         
     def negative_pool(self):
         t1 = time()

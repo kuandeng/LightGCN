@@ -17,7 +17,7 @@ def parse_args():
                         help='Project path.')
 
     parser.add_argument('--dataset', nargs='?', default='gowalla',
-                        help='Choose a dataset from {gowalla, yelp2018, amazon-book}')
+                        help='Choose a dataset from {gowalla, yelp2018, amazon-book, yelp2020}')
     parser.add_argument('--pretrain', type=int, default=0,
                         help='0: No pretrain, -1: Pretrain with the learned embeddings, 1:Pretrain with stored models.')
     parser.add_argument('--verbose', type=int, default=1,
@@ -42,9 +42,9 @@ def parse_args():
     parser.add_argument('--model_type', nargs='?', default='lightgcn',
                         help='Specify the name of model (lightgcn).')
     parser.add_argument('--adj_type', nargs='?', default='pre',
-                        help='Specify the type of the adjacency (laplacian) matrix from {plain, norm, mean}.')
+                        help='Specify the type of the adjacency (laplacian) matrix from {plain, norm, mean, adj_with_cp}.')
     parser.add_argument('--alg_type', nargs='?', default='lightgcn',
-                        help='Specify the type of the graph convolutional layer from {ngcf, gcn, gcmc}.')
+                        help='Specify the type of the graph convolutional layer from {ngcf, gcn, gcmc, pas, ngcfpas}.')
 
     parser.add_argument('--gpu_id', type=int, default=0,
                         help='0 for NAIS_prod, 1 for NAIS_concat')
