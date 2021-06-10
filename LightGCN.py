@@ -12,9 +12,11 @@ import os
 import sys
 import threading
 import tensorflow as tf
+import logging
 from tensorflow.python.client import device_lib
 from utility.helper import *
 from utility.batch_test import *
+
 os.environ['TF_CPP_MIN_LOG_LEVEL']='2'
 
 cpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'CPU']
@@ -40,13 +42,18 @@ class LightGCN(object):
         self.emb_dim = args.embed_size
         self.batch_size = args.batch_size
         self.weight_size = eval(args.layer_size)
+        self.alpha_k = args.alpha_k
         self.n_layers = len(self.weight_size)
+        if (self.alpha_k == 'leveled'):
+            self.layer_effects = eval(args.layer_effect)
+            self._validate_layer_effects()
         self.regs = eval(args.regs)
         self.decay = self.regs[0]
-        self.log_dir=self.create_model_str()
         self.verbose = args.verbose
         self.Ks = eval(args.Ks)
-
+    
+        self.log_dir=self.create_model_str()
+        self.node_dim = data_config['node_dim']
 
         '''
         *********************************************************
@@ -123,7 +130,10 @@ class LightGCN(object):
         """
         if self.alg_type in ['lightgcn']:
             self.ua_embeddings, self.ia_embeddings = self._create_lightgcn_embed()
-            
+
+        elif self.alg_type in ['LightGCN-alpha-1']:
+            self.ua_embeddings, self.ia_embeddings = self._create_lightgcn_alpha_k_equals_1_embed()
+        
         elif self.alg_type in ['ngcf']:
             self.ua_embeddings, self.ia_embeddings = self._create_ngcf_embed()
 
@@ -138,6 +148,25 @@ class LightGCN(object):
 
         elif self.alg_type in ['pas']:
             self.ua_embeddings, self.ia_embeddings = self._create_price_aware_simple_embed()
+            
+        elif self.alg_type in ['gcf']:
+            self.ua_embeddings, self.ia_embeddings = self._create_gcf_embed()
+        
+        elif self.alg_type in ['gcf-only-ip']:
+            self.ua_embeddings, self.ia_embeddings = self._create_gcf_only_ip_embed()
+
+        elif self.alg_type in ['gcf-sum']:
+            self.ua_embeddings, self.ia_embeddings = self._create_gcf_sum_embed()
+        
+        elif self.alg_type in ['gcf-sum-only-ip']:
+            self.ua_embeddings, self.ia_embeddings = self._create_gcf_sum_only_ip_embed()
+        
+        elif self.alg_type in ['gcf-minus-ip']:
+            self.ua_embeddings, self.ia_embeddings =self._create_gcf_minus_IP_embed()
+        
+        elif self.alg_type in ['LightGCN-concat']:
+            self.ua_embeddings, self.ia_embeddings =self._create_lightgcn_concat_embed()
+        
 
         """
         *********************************************************
@@ -167,10 +196,19 @@ class LightGCN(object):
 
         self.opt = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
     
-    
+    def _validate_layer_effects(self):
+        error = ''
+        if len(self.layer_effects) != self.n_layers + 1:
+            error += 'number of arguments for layer_effects does not match number of layers\n'
+        
+        assert len(error) == 0, error
+
     def create_model_str(self):
-        log_dir = '/' + self.alg_type+'/layers_'+str(self.n_layers)+'/dim_'+str(self.emb_dim)
-        log_dir+='/'+args.dataset+'/lr_' + str(self.lr) + '/reg_' + str(self.decay)
+        log_dir = '/' + self.alg_type + '/alpha_k_' + self.alpha_k
+        if self.alpha_k == 'leveled':
+            log_dir += '/layer_effect_' + str(self.layer_effects)
+        log_dir += '/adj_' + self.adj_type + '/layers_'+str(self.n_layers)+'/dim_'+str(self.emb_dim)
+        log_dir+='/'+args.dataset+'/lr_' + str(self.lr) + '/reg_' + str(self.decay) + '/k_' + str(self.Ks[0])
         return log_dir
 
 
@@ -230,7 +268,6 @@ class LightGCN(object):
     def _split_A_hat_node_dropout(self, X):
         A_fold_hat = []
         length_of_adj = (X._shape[0])
-		#num_user+num_items // 100
         fold_len = (length_of_adj) // self.n_fold
         for i_fold in range(self.n_fold):
             start = i_fold * fold_len
@@ -304,7 +341,149 @@ class LightGCN(object):
         all_embeddings = tf.concat(all_embeddings, 1)
         u_g_embeddings, i_g_embeddings, c_g_embeddings, p_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items, self.n_cat, self.n_price], 0)
         return u_g_embeddings, i_g_embeddings
+   
+    # Original GCF 
+    def _create_gcf_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+        else:
+            A_fold_hat = self._split_A_hat(self.norm_adj)
 
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+
+        for k in range(0, self.n_layers):
+            temp_embed = []
+
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+            
+            side_embeddings = tf.concat(temp_embed, 0)
+            ego_embeddings = side_embeddings + tf.multiply(ego_embeddings, side_embeddings)
+
+            # normalize embeddings
+            norm_embeddings = tf.nn.l2_normalize(ego_embeddings, axis=1)
+
+            #concat
+            all_embeddings += [norm_embeddings]
+        all_embeddings = tf.concat(all_embeddings, 1)
+        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        return u_g_embeddings, i_g_embeddings
+    
+    # Original GCF without inner product
+    def _create_gcf_minus_IP_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+        else:
+            A_fold_hat = self._split_A_hat(self.norm_adj)
+
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+
+        for k in range(0, self.n_layers):
+            temp_embed = []
+
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+            
+            side_embeddings = tf.concat(temp_embed, 0)
+
+            # normalize embeddings
+            norm_embeddings = tf.nn.l2_normalize(side_embeddings, axis=1)
+
+            #concat
+            all_embeddings += [norm_embeddings]
+
+        all_embeddings = tf.concat(all_embeddings, 1)
+        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        return u_g_embeddings, i_g_embeddings
+
+    #GCF only with IP 
+    def _create_gcf_only_ip_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+        else:
+            A_fold_hat = self._split_A_hat(self.norm_adj)
+
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+
+        for k in range(0, self.n_layers):
+            temp_embed = []
+
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+            
+            side_embeddings = tf.concat(temp_embed, 0)
+            ego_embeddings = tf.multiply(ego_embeddings, side_embeddings)
+
+            # normalize embeddings
+            norm_embeddings = tf.nn.l2_normalize(ego_embeddings, axis=1)
+
+            #concat
+            all_embeddings += [norm_embeddings]
+
+        all_embeddings = tf.concat(all_embeddings, 1)
+        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        return u_g_embeddings, i_g_embeddings
+    
+    # GCF with summing layers instead of concatenating layers
+    def _create_gcf_sum_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+        else:
+            A_fold_hat = self._split_A_hat(self.norm_adj)
+
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+
+        for k in range(0, self.n_layers):
+            temp_embed = []
+
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+            
+            side_embeddings = tf.concat(temp_embed, 0)
+            ego_embeddings = side_embeddings + tf.multiply(ego_embeddings, side_embeddings)
+
+            # normalize embeddings
+            norm_embeddings = tf.nn.l2_normalize(ego_embeddings, axis=1)
+            all_embeddings += [norm_embeddings]
+
+        # Summing and averaging layers
+        all_embeddings=tf.stack(all_embeddings,1)
+        all_embeddings=tf.reduce_mean(all_embeddings,axis=1,keepdims=False)
+        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        return u_g_embeddings, i_g_embeddings
+
+    # GCF with summing layers instead of concatenating layers and only with IP
+    def _create_gcf_sum_only_ip_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+        else:
+            A_fold_hat = self._split_A_hat(self.norm_adj)
+
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+
+        for k in range(0, self.n_layers):
+            temp_embed = []
+
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+            
+            side_embeddings = tf.concat(temp_embed, 0)
+            ego_embeddings = tf.multiply(ego_embeddings, side_embeddings)
+
+            # normalize embeddings
+            norm_embeddings = tf.nn.l2_normalize(ego_embeddings, axis=1)
+            all_embeddings += [norm_embeddings]
+
+        # Summing and averaging layers
+        all_embeddings=tf.stack(all_embeddings,1)
+        all_embeddings=tf.reduce_mean(all_embeddings,axis=1,keepdims=False)
+        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        return u_g_embeddings, i_g_embeddings
 
 
     def _create_lightgcn_embed(self):
@@ -317,7 +496,63 @@ class LightGCN(object):
         all_embeddings = [ego_embeddings]
         
         for k in range(0, self.n_layers):
-            # Equation 8
+
+            temp_embed = []
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+
+            side_embeddings = tf.concat(temp_embed, 0)
+            ego_embeddings = side_embeddings
+            all_embeddings += [ego_embeddings]
+        all_embeddings = tf.stack(all_embeddings,1)
+        all_embeddings = self._calc_alpha_k(all_embeddings) 
+        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        return u_g_embeddings, i_g_embeddings
+    
+    def _calc_alpha_k(self, embeddings):
+        if self.alpha_k == 'mean':
+            embeddings = tf.reduce_mean(embeddings,axis=1,keepdims=False)
+            return embeddings
+        elif self.alpha_k == 'leveled':
+            return self._leveled_alpha_k(embeddings)
+    
+    # Coefficient is an array of arrays, that contains the percentages of how much each layer should weigh.
+    def _leveled_alpha_k(self, embeddings):
+        # level_one, level_two, level_three = self._get_alpha_k_effect_levels()
+        # pre_temp = [0.25 for i in range(self.emb_dim)]
+        # temp = []
+        # for i in range(4):
+        #     temp.append(pre_temp)
+        # coeficients = []
+        # i = 0
+        # for dim in self.node_dim:
+        #     if i%100 == 0:
+        #         print(i)
+
+        #     if len(coeficients) == 0:
+        #         coeficients = [temp]
+        #     else:
+        #         coeficients.append(temp)
+        #     i += 1
+        layer_effects = self.layer_effects
+        for i in range(len(layer_effects)):
+            layer_effects[i] = [layer_effects[i] for k in range(self.emb_dim)]
+
+        coeficients = [layer_effects for k in range(len(self.node_dim))]
+        coeficients = np.array(coeficients)    
+        embeddings = tf.multiply(embeddings, coeficients)
+        return tf.reduce_sum(embeddings,axis=1,keepdims=False)
+
+    def _create_lightgcn_alpha_k_equals_1_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj) # performance reasons
+        else:
+            A_fold_hat = self._split_A_hat(self.norm_adj)
+        
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+        
+        for k in range(0, self.n_layers):
             temp_embed = []
             for f in range(self.n_fold):
                 temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
@@ -326,10 +561,32 @@ class LightGCN(object):
             ego_embeddings = side_embeddings
             all_embeddings += [ego_embeddings]
         all_embeddings=tf.stack(all_embeddings,1)
-        all_embeddings=tf.reduce_mean(all_embeddings,axis=1,keepdims=False)
+        all_embeddings=tf.reduce_sum(all_embeddings,axis=1,keepdims=False)
         u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
         return u_g_embeddings, i_g_embeddings
-    
+
+    def _create_lightgcn_concat_embed(self):
+        if self.node_dropout_flag:
+            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj) # performance reasons
+        else:
+            A_fold_hat = self._split_A_hat(self.norm_adj)
+        
+        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        all_embeddings = [ego_embeddings]
+        
+        for k in range(0, self.n_layers):
+
+            temp_embed = []
+            for f in range(self.n_fold):
+                temp_embed.append(tf.sparse_tensor_dense_matmul(A_fold_hat[f], ego_embeddings))
+
+            side_embeddings = tf.concat(temp_embed, 0)
+            ego_embeddings = side_embeddings
+            all_embeddings += [ego_embeddings]
+        all_embeddings = tf.concat(all_embeddings, 1)
+        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        return u_g_embeddings, i_g_embeddings
+
     def _create_ngcf_embed(self):
         if self.node_dropout_flag:
             A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
@@ -349,9 +606,6 @@ class LightGCN(object):
             side_embeddings = tf.concat(temp_embed, 0)
             sum_embeddings = tf.nn.leaky_relu(tf.matmul(side_embeddings, self.weights['W_gc_%d' % k]) + self.weights['b_gc_%d' % k])
 
-
-
-            # bi messages of neighbors.
             bi_embeddings = tf.multiply(ego_embeddings, side_embeddings)
             # transformed bi messages of neighbors.
             bi_embeddings = tf.nn.leaky_relu(tf.matmul(bi_embeddings, self.weights['W_bi_%d' % k]) + self.weights['b_bi_%d' % k])
@@ -413,6 +667,7 @@ class LightGCN(object):
 
             all_embeddings += [mlp_embeddings]
         all_embeddings = tf.concat(all_embeddings, 1)
+        
 
         u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
         return u_g_embeddings, i_g_embeddings
@@ -505,15 +760,60 @@ class train_thread_test(threading.Thread):
                                         model.neg_items: neg_items,
                                         model.node_dropout: eval(args.node_dropout),
                                         model.mess_dropout: eval(args.mess_dropout)})       
+def get_multi_split_train_writers(sess, tensorboard_model_path, splits):
+    users_to_test = []
+    train_writers = []
+    splits_with_users = []
+    for split in splits:
+        path = tensorboard_model_path + '/dimensionality_' + split + '/'
+        train_writer = tf.summary.FileWriter(path, sess.graph)
+        index = 0
+        if '-' in split:
+            sub_splits = split.split('-')
+            users = data_generator.test_set_range(int(sub_splits[0]), int(sub_splits[1]))
+            if len(users) > 0:
+                users_to_test.append(users)
+                train_writers.append(train_writer)
+                splits_with_users.append(split)
+        else:
+            last_index = len(split) - 1
+            sub_splits = split[0:last_index]
+            users = data_generator.test_set_range(int(sub_splits))
+            if len(users) > 0:
+                users_to_test.append(users)
+                train_writers.append(train_writer)
+                splits_with_users.append(split)
+    
+    
+    return users_to_test, train_writers, splits_with_users
 
 if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
     f0 = time()
-    
+    _logger = logging.getLogger()
+    _logger.setLevel(logging.DEBUG)
+    logging_file_path = args.log_file
+    if logging_file_path == '':
+        logging_file_path = 'log_file.out'
+    output_file_handler = logging.FileHandler(logging_file_path)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+
+    _logger.addHandler(output_file_handler)
+    _logger.addHandler(stdout_handler)
+    running_method_settings = (f"running with settings:\n" 
+                      f"dataset=            {args.dataset}\n" 
+                      f"layer_size=         {args.layer_size}\n"
+                      f"batch_size=         {args.batch_size}\n"
+                      f"alg_type=           {args.alg_type}\n"
+                      f"node_dropout_flag=  {args.node_dropout_flag}\n"
+                      f"node_dropout=       {args.node_dropout}\n"
+                      f"Ks=                 {args.Ks}\n"
+                      f"alpha_k=            {args.alpha_k}\n"
+                      f"evaluation=         {args.evaluation}\n")
+
+    _logger.debug(running_method_settings)
     config = dict()
-	#number of users
     config['n_users'] = data_generator.n_users
-	#number of items
     config['n_items'] = data_generator.n_items
     config['n_cat'] = data_generator.n_cat
     config['n_price'] = data_generator.n_price
@@ -522,26 +822,30 @@ if __name__ == '__main__':
     *********************************************************
     Generate the Laplacian matrix, where each entry defines the decay factor (e.g., p_ui) between two connected nodes.
     """
-    plain_adj, norm_adj, mean_adj,pre_adj, adj_with_cp = data_generator.get_adj_mat()
+    plain_adj, norm_adj, mean_adj,pre_adj, adj_with_cp, node_dim = data_generator.get_adj_mat()
+
+    config['node_dim'] = node_dim
     if args.adj_type == 'plain':
         config['norm_adj'] = plain_adj
-        print('use the plain adjacency matrix')
+        _logger.debug('use the plain adjacency matrix')
     elif args.adj_type == 'adj_with_cp':
         config['norm_adj'] = plain_adj
         config['cat_and_price_adj'] = adj_with_cp
-        print('use the adjacency matrix with categories and price')
-    elif args.adj_type == 'norm':
+        _logger.debug('use the adjacency matrix with categories and price')
+    elif args.adj_type == 'norm': 
+        # This is the adjacency matrix with self loops.
+        # Skal ikke bruges af LightGCN.
         config['norm_adj'] = norm_adj
-        print('use the normalized adjacency matrix')
+        _logger.debug('use the normalized adjacency matrix')
     elif args.adj_type == 'gcmc':
         config['norm_adj'] = mean_adj
-        print('use the gcmc adjacency matrix')
+        _logger.debug('use the gcmc adjacency matrix')
     elif args.adj_type=='pre':
         config['norm_adj']=pre_adj
-        print('use the pre adjcency matrix')
+        _logger.debug('use the pre adjacency matrix')
     else:
         config['norm_adj'] = mean_adj + sp.eye(mean_adj.shape[0])
-        print('use the mean adjacency matrix')
+        _logger.debug('use the mean adjacency matrix')
     t0 = time()
     if args.pretrain == -1:
         pretrain_data = load_pretrained_data()
@@ -581,7 +885,7 @@ if __name__ == '__main__':
         if ckpt and ckpt.model_checkpoint_path:
             sess.run(tf.global_variables_initializer())
             saver.restore(sess, ckpt.model_checkpoint_path)
-            print('load the pretrained model parameters from: ', pretrain_path)
+            _logger.debug('load the pretrained model parameters from: ', pretrain_path)
 
             # *********************************************************
             # get the performance from pretrained model.
@@ -595,16 +899,16 @@ if __name__ == '__main__':
                                (', '.join(['%.5f' % r for r in ret['recall']]),
                                 ', '.join(['%.5f' % r for r in ret['precision']]),
                                 ', '.join(['%.5f' % r for r in ret['ndcg']]))
-                print(pretrain_ret)
+                _logger.debug(pretrain_ret)
         else:
             sess.run(tf.global_variables_initializer())
             cur_best_pre_0 = 0.
-            print('without pretraining.')
+            _logger.debug('without pretraining.')
 
     else:
         sess.run(tf.global_variables_initializer())
         cur_best_pre_0 = 0.
-        print('without pretraining.')
+        _logger.debug('without pretraining.')
 
     """
     *********************************************************
@@ -642,15 +946,39 @@ if __name__ == '__main__':
     tensorboard_model_path = 'tensorboard/'
     if not os.path.exists(tensorboard_model_path):
         os.makedirs(tensorboard_model_path)
-    run_time = 1
-    while (True):
-        if os.path.exists(tensorboard_model_path + model.log_dir +'/run_' + str(run_time)):
-            run_time += 1
-        else:
-            break
-    train_writer = tf.summary.FileWriter(tensorboard_model_path +model.log_dir+ '/run_' + str(run_time), sess.graph)
-    
-    
+    # run_time = 1
+    # while (True):
+    #     if os.path.exists(tensorboard_model_path + model.log_dir +'/run_' + str(run_time)):
+    #         run_time += 1
+    #     else:
+    #         break
+    train_writer_splits = [
+        '1-5',
+        '6-10',
+        '11-15',
+        '16-20',
+        '21-25',
+        '26-30',
+        '31-35',
+        '36-40',
+        '41-45',
+        '46-50',    
+        '51-60',
+        '61-70',
+        '71-80',
+        '81-90',
+        '91-100',
+        '101-150',
+        '151-200',
+        '201-250',
+        '251-300',
+        '301+'
+    ]
+
+    if args.evaluation == 'multiple':
+        users_to_test_multiple, train_writers, train_writer_splits = get_multi_split_train_writers(sess, tensorboard_model_path + model.log_dir, train_writer_splits)
+    else:
+        train_writer = tf.summary.FileWriter(tensorboard_model_path +model.log_dir, sess.graph)
     loss_loger, pre_loger, rec_loger, ndcg_loger, hit_loger = [], [], [], [], []
     stopping_step = 0
     should_stop = False
@@ -689,30 +1017,54 @@ if __name__ == '__main__':
         summary_train_loss= sess.run(model.merged_train_loss,
                                       feed_dict={model.train_loss: loss, model.train_mf_loss: mf_loss,
                                                  model.train_emb_loss: emb_loss, model.train_reg_loss: reg_loss})
-        train_writer.add_summary(summary_train_loss, epoch)
+
+        if args.evaluation == 'multiple':
+            for i in range(len(train_writers)):
+                train_writers[i].add_summary(summary_train_loss, epoch)
+        else:
+            train_writer.add_summary(summary_train_loss, epoch)
+        
+
         if np.isnan(loss) == True:
-            print('ERROR: loss is nan.')
+            _logger.debug('ERROR: loss is nan.')
             sys.exit()
         
         if (epoch % 20) != 0:
             if args.verbose > 0 and epoch % args.verbose == 0:
                 perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f]' % (
                     epoch, time() - t1, loss, mf_loss, emb_loss)
-                print(perf_str)
+                _logger.debug(perf_str)
             continue
-        users_to_test = list(data_generator.train_items.keys())
-        ret = test(sess, model, users_to_test ,drop_flag=True,train_set_flag=1)
-        perf_str = 'Epoch %d: train==[%.5f=%.5f + %.5f + %.5f], recall=[%s], precision=[%s], ndcg=[%s]' % \
-                   (epoch, loss, mf_loss, emb_loss, reg_loss, 
-                    ', '.join(['%.5f' % r for r in ret['recall']]),
-                    ', '.join(['%.5f' % r for r in ret['precision']]),
-                    ', '.join(['%.5f' % r for r in ret['ndcg']]))
-        print(perf_str)
-        summary_train_acc = sess.run(model.merged_train_acc, feed_dict={model.train_rec_first: ret['recall'][0],
-                                                                        model.train_rec_last: ret['recall'][-1],
-                                                                        model.train_ndcg_first: ret['ndcg'][0],
-                                                                        model.train_ndcg_last: ret['ndcg'][-1]})
-        train_writer.add_summary(summary_train_acc, epoch // 20)
+        if args.evaluation == 'multiple':
+            for i in range(len(train_writers)):
+                users_to_test = users_to_test_multiple[i]
+                ret = test(sess, model, users_to_test ,drop_flag=True,train_set_flag=1)
+                perf_str = 'Epoch %d - Split %s: train==[%.5f=%.5f + %.5f + %.5f], recall=[%s], precision=[%s], ndcg=[%s]' % \
+                        (epoch, train_writer_splits[i], loss, mf_loss, emb_loss, reg_loss, 
+                            ', '.join(['%.5f' % r for r in ret['recall']]),
+                            ', '.join(['%.5f' % r for r in ret['precision']]),
+                            ', '.join(['%.5f' % r for r in ret['ndcg']]))
+                _logger.debug(perf_str)
+                summary_train_acc = sess.run(model.merged_train_acc, feed_dict={model.train_rec_first: ret['recall'][0],
+                                                                                model.train_rec_last: ret['recall'][-1],
+                                                                                model.train_ndcg_first: ret['ndcg'][0],
+                                                                                model.train_ndcg_last: ret['ndcg'][-1]})
+                train_writers[i].add_summary(summary_train_acc, epoch // 20)
+        else:
+            users_to_test = list(data_generator.train_items.keys())
+            ret = test(sess, model, users_to_test ,drop_flag=True,train_set_flag=1)
+            perf_str = 'Epoch %d: train==[%.5f=%.5f + %.5f + %.5f], recall=[%s], precision=[%s], ndcg=[%s]' % \
+                    (epoch, loss, mf_loss, emb_loss, reg_loss, 
+                        ', '.join(['%.5f' % r for r in ret['recall']]),
+                        ', '.join(['%.5f' % r for r in ret['precision']]),
+                        ', '.join(['%.5f' % r for r in ret['ndcg']]))
+            _logger.debug(perf_str)
+            summary_train_acc = sess.run(model.merged_train_acc, feed_dict={model.train_rec_first: ret['recall'][0],
+                                                                            model.train_rec_last: ret['recall'][-1],
+                                                                            model.train_ndcg_first: ret['ndcg'][0],
+                                                                            model.train_ndcg_last: ret['ndcg'][-1]})
+            train_writer.add_summary(summary_train_acc, epoch // 20)
+
         
         '''
         *********************************************************
@@ -742,45 +1094,106 @@ if __name__ == '__main__':
         summary_test_loss = sess.run(model.merged_test_loss,
                                      feed_dict={model.test_loss: loss_test, model.test_mf_loss: mf_loss_test,
                                                 model.test_emb_loss: emb_loss_test, model.test_reg_loss: reg_loss_test})
-        train_writer.add_summary(summary_test_loss, epoch // 20)
-        t2 = time()
-        users_to_test = list(data_generator.test_set.keys())
-        ret = test(sess, model, users_to_test, drop_flag=True)
-        summary_test_acc = sess.run(model.merged_test_acc,
-                                    feed_dict={model.test_rec_first: ret['recall'][0], model.test_rec_last: ret['recall'][-1],
-                                               model.test_ndcg_first: ret['ndcg'][0], model.test_ndcg_last: ret['ndcg'][-1]})
-        train_writer.add_summary(summary_test_acc, epoch // 20)
-                                                                                                 
-                                                                                                 
-        t3 = time()
-        
-        loss_loger.append(loss)
-        rec_loger.append(ret['recall'])
-        pre_loger.append(ret['precision'])
-        ndcg_loger.append(ret['ndcg'])
+        if args.evaluation == 'multiple':
+            for i in range(len(train_writers)):
+                train_writers[i].add_summary(summary_test_loss, epoch // 20)
+        else:
+            train_writer.add_summary(summary_test_loss, epoch // 20)
+        _logger.debug('\n' + model.log_dir)
+        if args.evaluation == 'multiple':
+            for i in range(len(train_writers)):
+                t2 = time()
+                users_to_test = users_to_test_multiple[i]
+                ret = test(sess, model, users_to_test, drop_flag=True)
+                summary_test_acc = sess.run(model.merged_test_acc,
+                                            feed_dict={model.test_rec_first: ret['recall'][0], model.test_rec_last: ret['recall'][-1],
+                                                    model.test_ndcg_first: ret['ndcg'][0], model.test_ndcg_last: ret['ndcg'][-1]})
+                train_writers[i].add_summary(summary_test_acc, epoch // 20)
+                
+                                                  
+                t3 = time()
+                
+                loss_loger.append(loss)
+                rec_loger.append(ret['recall'])
+                pre_loger.append(ret['precision'])
+                ndcg_loger.append(ret['ndcg'])
 
-        if args.verbose > 0:
-            perf_str = 'Epoch %d [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%s], ' \
-                       'precision=[%s], ndcg=[%s]' % \
-                       (epoch, t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, 
-                        ', '.join(['%.5f' % r for r in ret['recall']]),
-                        ', '.join(['%.5f' % r for r in ret['precision']]),
-                        ', '.join(['%.5f' % r for r in ret['ndcg']]))
-            print(perf_str)
+                if args.verbose > 0:
+                    perf_str = 'Epoch %d  - Split %s [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%s], ' \
+                            'precision=[%s], ndcg=[%s]' % \
+                            (epoch, train_writer_splits[i], t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, 
+                                ', '.join(['%.5f' % r for r in ret['recall']]),
+                                ', '.join(['%.5f' % r for r in ret['precision']]),
+                                ', '.join(['%.5f' % r for r in ret['ndcg']]))
+                    _logger.debug(perf_str)
             
-        cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['recall'][0], cur_best_pre_0,
-                                                                    stopping_step, expected_order='acc', flag_step=5)
+            stop_test_time = time()
+            
+            users_to_test = list(data_generator.test_set.keys())
+            ret = test(sess, model, users_to_test, drop_flag=True)
 
-        # *********************************************************
-        # early stopping when cur_best_pre_0 is decreasing for ten successive steps.
-        if should_stop == True:
-            break
+            cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['recall'][0], cur_best_pre_0,
+                                                                        stopping_step, expected_order='acc', flag_step=5)
+            if args.verbose > 0:
+                perf_str = 'Epoch %d - Combined: [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%s], ' \
+                        'precision=[%s], ndcg=[%s]' % \
+                        (epoch, t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, 
+                            ', '.join(['%.5f' % r for r in ret['recall']]),
+                            ', '.join(['%.5f' % r for r in ret['precision']]),
+                            ', '.join(['%.5f' % r for r in ret['ndcg']]))
+                _logger.debug(perf_str)
 
-        # *********************************************************
-        # save the user & item embeddings for pretraining.
-        if ret['recall'][0] == cur_best_pre_0 and args.save_flag == 1:
-            save_saver.save(sess, weights_save_path + '/weights', global_step=epoch)
-            print('save the weights in path: ', weights_save_path)
+            after_test_time = time()
+            # *********************************************************
+            # early stopping when cur_best_pre_0 is decreasing for ten successive steps.
+            _logger.debug('early stopping test took: %.1f seconds' % (after_test_time - stop_test_time))
+            if should_stop == True:
+                break
+
+            # *********************************************************
+            # save the user & item embeddings for pretraining.
+            if ret['recall'][0] == cur_best_pre_0 and args.save_flag == 1:
+                save_saver.save(sess, weights_save_path + '/weights', global_step=epoch)
+                _logger.debug('save the weights in path: ', weights_save_path)
+        else:    
+            t2 = time()
+
+            users_to_test = list(data_generator.test_set.keys())
+            ret = test(sess, model, users_to_test, drop_flag=True)
+            summary_test_acc = sess.run(model.merged_test_acc,
+                                        feed_dict={model.test_rec_first: ret['recall'][0], model.test_rec_last: ret['recall'][-1],
+                                                model.test_ndcg_first: ret['ndcg'][0], model.test_ndcg_last: ret['ndcg'][-1]})
+            train_writer.add_summary(summary_test_acc, epoch // 20)
+                                                                                                    
+            t3 = time()
+            
+            loss_loger.append(loss)
+            rec_loger.append(ret['recall'])
+            pre_loger.append(ret['precision'])
+            ndcg_loger.append(ret['ndcg'])
+
+            if args.verbose > 0:
+                perf_str = 'Epoch %d [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%s], ' \
+                        'precision=[%s], ndcg=[%s]' % \
+                        (epoch, t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, 
+                            ', '.join(['%.5f' % r for r in ret['recall']]),
+                            ', '.join(['%.5f' % r for r in ret['precision']]),
+                            ', '.join(['%.5f' % r for r in ret['ndcg']]))
+                _logger.debug(perf_str)
+                
+            cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['recall'][0], cur_best_pre_0,
+                                                                        stopping_step, expected_order='acc', flag_step=5)
+
+            # *********************************************************
+            # early stopping when cur_best_pre_0 is decreasing for ten successive steps.
+            if should_stop == True:
+                break
+
+            # *********************************************************
+            # save the user & item embeddings for pretraining.
+            if ret['recall'][0] == cur_best_pre_0 and args.save_flag == 1:
+                save_saver.save(sess, weights_save_path + '/weights', global_step=epoch)
+                _logger.debug('save the weights in path: ', weights_save_path)
     recs = np.array(rec_loger)
     pres = np.array(pre_loger)
     ndcgs = np.array(ndcg_loger)
@@ -792,7 +1205,7 @@ if __name__ == '__main__':
                  (idx, time() - t0, '\t'.join(['%.5f' % r for r in recs[idx]]),
                   '\t'.join(['%.5f' % r for r in pres[idx]]),
                   '\t'.join(['%.5f' % r for r in ndcgs[idx]]))
-    print(final_perf)
+    _logger.debug(final_perf)
 
     save_path = '%soutput/%s/%s.result' % (args.proj_path, args.dataset, model.model_type)
     ensureDir(save_path)

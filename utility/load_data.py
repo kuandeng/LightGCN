@@ -32,27 +32,32 @@ class Data(object):
         self.price_list = []
         self.cat_list = []
         self.business_list = []
+        self.item_file_missing = False
+        self.n_user_interactions = {}
 
         self.exist_users = []
         #read item_list containing category and prices
-        with open(item_file) as f:
-            for l in f.readlines():
-                if len(l) > 0:
-                    l = l.strip('\n').split(' ')
-                    if(l[-1] not in self.price_list and len(l) > 3): #Checks if price exists in list.
-                        self.price_list.append(l[-1])
-                        self.n_price += 1
-                    self.item_categories = []
-                    for i in range(2, len(l)): #The first two elements are item name and item id. The last i price
-                        if(i != len(l) and l[i] not in self.cat_list):
-                            self.cat_list.append(l[i])
-                            self.n_cat += 1
-                        self.item_categories.append(l[i])
-                    self.business_list.append(business_model(l[1], self.item_categories, l[-1]))
-        print('n_price: ' + str(self.n_price))
-        print('n_cat: ' + str(self.n_cat))
-        print('cat_list: ' + str(len(self.cat_list)))
-        print('price_list: ' + str(len(self.price_list)))
+        try:
+            with open(item_file) as f:
+                for l in f.readlines():
+                    if len(l) > 0:
+                        l = l.strip('\n').split(' ')
+                        if(l[-1] not in self.price_list and len(l) > 3): #Checks if price exists in list.
+                            self.price_list.append(l[-1])
+                            self.n_price += 1
+                        self.item_categories = []
+                        for i in range(2, len(l)): #The first two elements are item name and item id. The last i price
+                            if(i != len(l) and l[i] not in self.cat_list):
+                                self.cat_list.append(l[i])
+                                self.n_cat += 1
+                            self.item_categories.append(l[i])
+                        self.business_list.append(business_model(l[1], self.item_categories, l[-1]))
+            print('n_price: ' + str(self.n_price))
+            print('n_cat: ' + str(self.n_cat))
+            print('cat_list: ' + str(len(self.cat_list)))
+            print('price_list: ' + str(len(self.price_list)))
+        except Exception:
+            self.item_file_missing = True
         
         #read training file
         with open(train_file) as f:
@@ -65,6 +70,7 @@ class Data(object):
                     self.n_items = max(self.n_items, max(items))
                     self.n_users = max(self.n_users, uid)
                     self.n_train += len(items)
+                    self.n_user_interactions[uid] = len(items)
         #read test file
         with open(test_file) as f:
             for l in f.readlines():
@@ -105,7 +111,7 @@ class Data(object):
                     
                     uid, test_items = items[0], items[1:]
                     self.test_set[uid] = test_items
-
+    
     def get_adj_mat(self):
         try:
             t1 = time()
@@ -120,7 +126,8 @@ class Data(object):
             sp.save_npz(self.path + '/s_adj_mat.npz', adj_mat)
             sp.save_npz(self.path + '/s_norm_adj_mat.npz', norm_adj_mat)
             sp.save_npz(self.path + '/s_mean_adj_mat.npz', mean_adj_mat)
-            sp.save_npz(self.path + '/s_adj_mat_with_cp.npz', adj_mat_with_cp)
+            if self.item_file_missing == False:
+                sp.save_npz(self.path + '/s_adj_mat_with_cp.npz', adj_mat_with_cp)
 
         try:
             pre_adj_mat = sp.load_npz(self.path + '/s_pre_adj_mat.npz')
@@ -136,9 +143,18 @@ class Data(object):
             print('generate pre adjacency matrix.')
             pre_adj_mat = norm_adj.tocsr()
             sp.save_npz(self.path + '/s_pre_adj_mat.npz', norm_adj)
-            
-        return adj_mat, norm_adj_mat, mean_adj_mat,pre_adj_mat, adj_mat_with_cp
 
+        try:
+            node_dim = np.load(self.path + '/s_node_dim.npy')
+        except:
+            node_dim = self.get_node_dimensionality(adj_mat)
+            np.save(self.path + '/s_node_dim', node_dim)
+        return adj_mat, norm_adj_mat, mean_adj_mat, pre_adj_mat, adj_mat_with_cp, node_dim
+
+    def get_node_dimensionality(self, adj_mat):
+        node_dim = np.squeeze(np.asarray(adj_mat.sum(1)))
+        print(node_dim[0])
+        return node_dim
     def create_adj_mat(self):
         t1 = time()
 		#adj matrix = num_users+num_items X num_users+num_items
@@ -172,7 +188,7 @@ class Data(object):
                 print("iteration: ", i)
             print(adj_mat_with_cat_and_price._shape)
 
-            adj_connection_value = 1.0
+            adj_connection_value = 1
             for row in range(0, self.n_items):      # Iterates through the category list of each item to find connections
                 categories = self.business_list[row].categories
                 
@@ -215,10 +231,13 @@ class Data(object):
         
         norm_adj_mat = normalized_adj_single(adj_mat + sp.eye(adj_mat.shape[0]))
         mean_adj_mat = normalized_adj_single(adj_mat)
-        adj_with_cp = adj_with_cat_and_price(adj_mat) 
-
+        if self.item_file_missing == False:
+            adj_with_cp = adj_with_cat_and_price(adj_mat) 
+            awc = adj_with_cp.tocsr()
+        else:
+            awc = None
         print('already normalize adjacency matrix', time() - t2)
-        return adj_mat.tocsr(), norm_adj_mat.tocsr(), mean_adj_mat.tocsr(), adj_with_cp.tocsr()
+        return adj_mat.tocsr(), norm_adj_mat.tocsr(), mean_adj_mat.tocsr(), awc
         
     def negative_pool(self):
         t1 = time()
@@ -318,7 +337,7 @@ class Data(object):
     def print_statistics(self):
         print('n_users=%d, n_items=%d' % (self.n_users, self.n_items))
         print('n_interactions=%d' % (self.n_train + self.n_test))
-        print('n_train=%d, n_test=%d, sparsity=%.5f' % (self.n_train, self.n_test, (self.n_train + self.n_test)/(self.n_users * self.n_items)))
+        print('n_train=%d, n_test=%d, density=%.5f' % (self.n_train, self.n_test, (self.n_train + self.n_test)/(self.n_users * self.n_items)))
 
 
     def get_sparsity_split(self):
@@ -344,6 +363,18 @@ class Data(object):
 
         return split_uids, split_state
 
+    def test_set_range(self, min_interactions, max_interactions=None):
+        users_to_test = []
+        for user_id in self.test_set.keys():
+            n_interactions = self.n_user_interactions[user_id]
+            if max_interactions != None:
+                if n_interactions >= min_interactions and n_interactions <= max_interactions:
+                    users_to_test.append(user_id)
+            else:
+                if n_interactions >= min_interactions:
+                    users_to_test.append(user_id)
+
+        return users_to_test
 
 
     def create_sparsity_split(self):

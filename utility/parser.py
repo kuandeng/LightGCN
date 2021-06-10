@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument('--proj_path', nargs='?', default='',
                         help='Project path.')
 
-    parser.add_argument('--dataset', nargs='?', default='gowalla',
+    parser.add_argument('--dataset', nargs='?', default='yelp2020',
                         help='Choose a dataset from {gowalla, yelp2018, amazon-book, yelp2020}')
     parser.add_argument('--pretrain', type=int, default=0,
                         help='0: No pretrain, -1: Pretrain with the learned embeddings, 1:Pretrain with stored models.')
@@ -29,8 +29,10 @@ def parse_args():
 
     parser.add_argument('--embed_size', type=int, default=64,
                         help='Embedding size.')
-    parser.add_argument('--layer_size', nargs='?', default='[64, 64, 64, 64]',
+    parser.add_argument('--layer_size', nargs='?', default='[64, 64, 64]',
                         help='Output sizes of every layer')
+    parser.add_argument('--layer_effect', nargs='?', default='[[0.1, 0.1, 0.2, 0.6], [0.1, 0.2, 0.5, 0.2], [0.1, 0.5, 0.3, 0.1]]',
+                        help='Define the weight of each layer')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size.')
 
@@ -44,7 +46,7 @@ def parse_args():
     parser.add_argument('--adj_type', nargs='?', default='pre',
                         help='Specify the type of the adjacency (laplacian) matrix from {plain, norm, mean, adj_with_cp}.')
     parser.add_argument('--alg_type', nargs='?', default='lightgcn',
-                        help='Specify the type of the graph convolutional layer from {ngcf, gcn, gcmc, pas, ngcfpas}.')
+                        help='Specify the type of the graph convolutional layer from {ngcf, gcn, gcmc, pas, ngcfpas, gcf, gcf-sum-minus-self-con, gcf-sum, gcf-minus-self-con}.')
 
     parser.add_argument('--gpu_id', type=int, default=0,
                         help='0 for NAIS_prod, 1 for NAIS_concat')
@@ -68,4 +70,13 @@ def parse_args():
     parser.add_argument('--report', type=int, default=0,
                         help='0: Disable performance report w.r.t. sparsity levels, 1: Show performance report w.r.t. sparsity levels')
 
+    parser.add_argument('--alpha_k', nargs='?', default='mean',
+                        help='Specify the alpha k method from {mean, leveled}')
+
+    parser.add_argument('--evaluation', nargs='?', default='default',
+                        help='Specify the evaluation method either standard or dividing users into multiple split {default, multiple}')
+   
+    parser.add_argument('--log_file', nargs='?', default='',
+                        help='Specify file path that print statements should log to')
+    
     return parser.parse_args()
